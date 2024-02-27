@@ -5,49 +5,85 @@ public class SubjectNode
     public Role CurrentRole { get; set; }
     public Guid Identifier { get; }
 
+    public bool IsHealthy { get; set; }
+
+    public bool IsTest { get; set; }
+
     public int WaitTime { get; set; }
     public string LogFileName { get; set; }
     public List<SubjectNode> List { get; set; }
     public System.Timers.Timer ElectionCountdownTimer { get; set; }
 
     public System.Timers.Timer HeartbeatTimer { get; set; }
-    public SubjectNode(string fileName)
+#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
+    public SubjectNode(string fileName, bool isAlive = true, bool IsTest = false)
     {
-        LogFileName = fileName;
-        Guid current;
-
-        (_, _, current) = ReadNumbersFromFile(LogFileName);
-        if (current == Guid.Empty)
+        IsHealthy = isAlive;
+        this.IsTest = IsTest;
+        LogFileName = "";
+        List = [];
+        if (IsHealthy)
         {
-            Identifier = System.Guid.NewGuid();
+
+
+            LogFileName = fileName;
+            Guid current;
+            Guid leader;
+            int term;
+            (term, leader, current) = ReadNumbersFromFile(LogFileName);
+            if (current == Guid.Empty)
+            {
+                Identifier = System.Guid.NewGuid();
+            }
+            else
+            {
+                Identifier = current;
+            }
+
+
+            Random random = new Random();
+            WaitTime = random.Next(200, 601);
+
+            ElectionCountdownTimer = new System.Timers.Timer(WaitTime);
+            HeartbeatTimer = new System.Timers.Timer(50)
+            {
+                AutoReset = true
+            };
+#pragma warning disable CS8622 // Nullability of reference types in type of parameter doesn't match the target delegate (possibly because of nullability attributes).
+            HeartbeatTimer.Elapsed += SendHeartbeats;
+            ElectionCountdownTimer.AutoReset = true;
+            List = [];
+            ElectionCountdownTimer.Elapsed += BecomeLeader;
+            HeartbeatTimer.Enabled = true;
+            ElectionCountdownTimer.Enabled = true;
+#pragma warning restore CS8622 // Nullability of reference types in type of parameter doesn't match the target delegate (possibly because of nullability attributes).
+
+            if (leader == Identifier)
+            {
+                ElectionCountdownTimer.Stop();
+                HeartbeatTimer.Start();
+                CurrentRole = Role.LEADER;
+                Console.WriteLine($"Node {Identifier} is leader for term {term}");
+            }
+            else
+            {
+                ElectionCountdownTimer.Start();
+                HeartbeatTimer.Stop();
+                CurrentRole = Role.FOLLOWER;
+            }
         }
         else
         {
-            Identifier = current;
+            CurrentRole = Role.FOLLOWER;
         }
-
-        CurrentRole = Role.FOLLOWER;
-        Random random = new Random();
-        WaitTime = random.Next(100, 601);
-
-        ElectionCountdownTimer = new System.Timers.Timer(WaitTime);
-        HeartbeatTimer = new System.Timers.Timer(50);
-        HeartbeatTimer.AutoReset = true;
-        ElectionCountdownTimer.AutoReset = true;
-        List = [];
-        ElectionCountdownTimer.Elapsed += BecomeLeader;
-        HeartbeatTimer.Elapsed += SendHeartbeats;
-        HeartbeatTimer.Enabled = true;
-        ElectionCountdownTimer.Enabled = true;
-        ElectionCountdownTimer.Start();
-        HeartbeatTimer.Stop();
     }
 
 
     private static readonly object fileLock = new(); // Lock object to synchronize file access
 
-    public void WriteNumbersToFile(int number1, Guid number2, string filePath)
+    private void WriteNumbersToFile(int number1, Guid number2)
     {
+        string filePath = LogFileName;
         lock (fileLock)
         {
             // Check if the file is being read
@@ -63,7 +99,7 @@ public class SubjectNode
         }
     }
 
-    public static (int, Guid, Guid) ReadNumbersFromFile(string filePath)
+    private static (int, Guid, Guid) ReadNumbersFromFile(string filePath)
     {
         lock (fileLock)
         {
@@ -72,7 +108,6 @@ public class SubjectNode
                 // Return empty information if the file is blank or doesn't exist
                 return (0, Guid.Empty, Guid.Empty);
             }
-
             // Read numbers from file
             string[] numbers = File.ReadAllText(filePath).Split(',');
             int number1 = Convert.ToInt32(numbers[0]);
@@ -97,141 +132,156 @@ public class SubjectNode
         }
     }
 
-    public void BecomeLeader(Object source, ElapsedEventArgs e)
+    private void BecomeLeader(Object source, ElapsedEventArgs e)
     {
-        while (List.Count != 3)
+        StartElection();
+    }
+
+    private bool? ProcessVoteRequest(Guid voterGuid, int term)
+    {
+        if (IsHealthy)
         {
-            Thread.Sleep(100);
-        }
-        var (term, _, _) = ReadNumbersFromFile(LogFileName);
-        term += 1;
-        WriteNumbersToFile(term, Identifier, LogFileName);
-        int voteCount = 1;
-        foreach (var node in List)
-        {
-            if (node.Identifier != Identifier)
+
+            var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
+            if (term > currentTerm)
             {
-                bool result = node.ProcessVoteRequest(Identifier, term);
-                if (result)
+                if (CurrentRole != Role.FOLLOWER)
                 {
-                    voteCount++;
+                    HeartbeatTimer.Stop();
+                    CurrentRole = Role.FOLLOWER;
+                }
+                WriteNumbersToFile(term, voterGuid);
+                return true;
+            }
+            else if (term == currentTerm)
+            {
+                return voterGuid == votedFor;
+            }
+            return false;
+        }
+        return false;
+
+    }
+
+    private bool? ProcessHeartbeat(Guid leaderGuid, int term)
+    {
+        var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
+        if (IsHealthy)
+        {
+            if (votedFor != leaderGuid || currentTerm != term)
+            {
+                WriteNumbersToFile(term, votedFor);
+            }
+            if (CurrentRole == Role.CANDIDATE)
+            {
+                CurrentRole = Role.FOLLOWER;
+
+            }
+            if (!IsTest)
+            {
+                ElectionCountdownTimer.Stop();
+                ElectionCountdownTimer.Start();
+            }
+            return true;
+        }
+        return null;
+    }
+
+    private void SendHeartbeats(Object source, ElapsedEventArgs e)
+    {
+        var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
+        if (IsHealthy)
+        {
+            Console.WriteLine("Sending Heartbeats");
+            foreach (var item in List)
+            {
+                if (item != this)
+                {
+                    _ = item.ProcessHeartbeat(Identifier, currentTerm);
                 }
             }
         }
-
-        if (voteCount >= 2)
-        {
-            Console.WriteLine($"Node {Identifier} is leader for term {term}");
-            CurrentRole = Role.LEADER;
-            HeartbeatTimer.Start();
-            ElectionCountdownTimer.Stop();
-        }
-    }
-
-    public bool ProcessVoteRequest(Guid voterGuid, int term)
-    {
-        var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
-        if (term > currentTerm)
-        {
-            if (CurrentRole != Role.FOLLOWER)
-            {
-                HeartbeatTimer.Stop();
-                CurrentRole = Role.FOLLOWER;
-            }
-            WriteNumbersToFile(term, voterGuid, LogFileName);
-            return true;
-        }
-        else if (term == currentTerm)
-        {
-            return voterGuid == votedFor;
-        }
-        return false;
-    }
-
-    public bool ProcessHeartbeat(Guid leaderGuid)
-    {
-        if (CurrentRole == Role.CANDIDATE)
+        else
         {
             CurrentRole = Role.FOLLOWER;
         }
-        ElectionCountdownTimer.Stop();
-        ElectionCountdownTimer.Start();
-        return true;
     }
 
-    public void SendHeartbeats(Object source, ElapsedEventArgs e)
+
+    public void AlterHealth(bool IsHealthy)
     {
-        Console.WriteLine("Sending Heartbeats");
-        foreach (var item in List)
+        this.IsHealthy = IsHealthy;
+    }
+
+    public Role GetRole()
+    {
+        Console.WriteLine($"Current role is: {CurrentRole}");
+        return this.CurrentRole;
+    }
+
+
+    public int StartElection(int UsedTerm = -1)
+    {
+        if (IsHealthy)
         {
-            if (item != this)
+            Console.WriteLine($"Beginning election with {Identifier} as candidate");
+
+            ElectionCountdownTimer.Stop();
+            while (List.Count == 0)
             {
-                _ = item.ProcessHeartbeat(Identifier);
+                Thread.Sleep(100);
+            }
+            var (term, _, _) = ReadNumbersFromFile(LogFileName);
+            term += 1;
+            if (UsedTerm != -1)
+            {
+                term = UsedTerm;
+            }
+            WriteNumbersToFile(term, Identifier);
+
+            int voteCount = 1;
+            foreach (var node in List)
+            {
+                if (node.Identifier != Identifier)
+                {
+                    bool? result = node.ProcessVoteRequest(Identifier, term);
+                    if (result != null && result != false)
+                    {
+                        voteCount++;
+                        Console.WriteLine(voteCount);
+                    }
+                }
+            }
+
+            if (voteCount * 2 >= List.Count)
+            {
+                Console.WriteLine($"Node {Identifier} is leader for term {term}");
+                CurrentRole = Role.LEADER;
+                HeartbeatTimer.Start();
+                ElectionCountdownTimer.Stop();
+                return voteCount;
+            }
+            else
+            {
+                CurrentRole = Role.FOLLOWER;
+                if (IsHealthy)
+                {
+                    if (!IsTest)
+                    {
+                        ElectionCountdownTimer.Start();
+                    }
+                    return voteCount;
+                }
             }
         }
+        return 0;
     }
+
 }
 
 public enum Role
 {
-    LEADER,
     FOLLOWER,
-    CANDIDATE
+    CANDIDATE,
+    LEADER,
 }
-/*
-create 3 nodes
-each has a unique, stored GUID and a randomly chosen wait time
-for each node:
-
-Run down the time determined in wait time
-when completed, increment round number by one and check for leader in file
-there is no leader for the current round, nominate yourself
-Request votes from the other 2 nodes, with the round number included.
-If get back 1 vote, declare self leader and tell other nodes
-Store leader in file.
-Reset timer
-
-If recieve vote request:
-If round being voted on not current round, increment to current round
-If not declared self nominee or voted this round, return vote yes
-otherwise, vote no
-
-if recieve leader comfirmation
-Reset timer
-
-
-Needs to lock file when voting
-
-
-
-Timer going
-Check state
-If leader, don't restart
-
-
-Get design parameters from reading
-
-
-if heartbeat not recieved in time:
-begin election
-
-
-begin election:
-increment current term
-vote for self
-send off vote requests
-
-if get majority:
-declare leader
-Begin sending heartbeats
-heartbeat has leaderId, term number
-if heartbeat recieved, becomes follower
-
-if candidate times out, begin new election
-
-
-
-
-
-
-*/
