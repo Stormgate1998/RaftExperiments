@@ -279,5 +279,36 @@ namespace RaftTests
             Assert.That(result, Is.EqualTo(1));
         }
 
+        [Test]
+        public void AllowFormerUnhealthyNodeToBecomeLeader()
+        {
+            string filename1 = "../../../nodeLogs/one.txt";
+            string filename2 = "../../../nodeLogs/two.txt";
+            string filename3 = "../../../nodeLogs/three.txt";
+            string filename4 = "../../../nodeLogs/four.txt";
+            string filename5 = "../../../nodeLogs/five.txt";
+            File.WriteAllText(filename1, "");
+            File.WriteAllText(filename2, "");
+            File.WriteAllText(filename3, "");
+            File.WriteAllText(filename4, "");
+            File.WriteAllText(filename5, "");
+            List<SubjectNode> list = [new SubjectNode(filename1, true, true), new SubjectNode(filename2, true, true), new SubjectNode(filename3, true, true), new SubjectNode(filename4, true, true), new SubjectNode(filename5, true, true)];
+
+            foreach (var item in list)
+            {
+                item.List = list;
+            }
+            list[4].AlterHealth(false);
+            list[0].StartElection();
+            Thread.Sleep(1000);
+            list[4].AlterHealth(true);
+            Thread.Sleep(1000);
+            list[0].AlterHealth(false);
+            list[4].StartElection();
+            Role testRole = list[4].GetRole();
+
+            Assert.That(testRole, Is.EqualTo(Role.LEADER));
+        }
+
     }
 }
