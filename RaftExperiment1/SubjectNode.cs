@@ -3,7 +3,11 @@ using System.Timers;
 public class SubjectNode
 {
     public Role CurrentRole { get; set; }
+
+    public Guid currentLeader { get; set; }
     public Guid Identifier { get; }
+
+    private Dictionary<string, (string, int)> keyValueLog = [];
 
     public bool IsHealthy { get; set; }
 
@@ -42,7 +46,7 @@ public class SubjectNode
 
 
             Random random = new Random();
-            WaitTime = random.Next(200, 601);
+            WaitTime = random.Next(200, 900);
 
             ElectionCountdownTimer = new System.Timers.Timer(WaitTime);
             HeartbeatTimer = new System.Timers.Timer(50)
@@ -63,6 +67,7 @@ public class SubjectNode
                 ElectionCountdownTimer.Stop();
                 HeartbeatTimer.Start();
                 CurrentRole = Role.LEADER;
+                currentLeader = Identifier;
                 Console.WriteLine($"Node {Identifier} is leader for term {term}");
             }
             else
@@ -70,12 +75,19 @@ public class SubjectNode
                 ElectionCountdownTimer.Start();
                 HeartbeatTimer.Stop();
                 CurrentRole = Role.FOLLOWER;
+                currentLeader = leader;
             }
         }
         else
         {
             CurrentRole = Role.FOLLOWER;
         }
+    }
+
+
+    public Guid FindLeader()
+    {
+        return currentLeader;
     }
 
 
@@ -138,7 +150,7 @@ public class SubjectNode
     }
 
     private bool? ProcessVoteRequest(Guid voterGuid, int term)
-    {
+    { //ELEPHANT Edit for log thing
         if (IsHealthy)
         {
 
@@ -165,6 +177,7 @@ public class SubjectNode
 
     private bool? ProcessHeartbeat(Guid leaderGuid, int term)
     {
+        currentLeader = leaderGuid;
         var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
         if (IsHealthy)
         {
@@ -189,6 +202,11 @@ public class SubjectNode
 
     private void SendHeartbeats(Object source, ElapsedEventArgs e)
     {
+        SendingHeartbeat();
+    }
+
+    private void SendingHeartbeat()
+    {
         var (currentTerm, votedFor, _) = ReadNumbersFromFile(LogFileName);
         if (IsHealthy)
         {
@@ -206,7 +224,6 @@ public class SubjectNode
             CurrentRole = Role.FOLLOWER;
         }
     }
-
 
     public void AlterHealth(bool IsHealthy)
     {
@@ -263,20 +280,136 @@ public class SubjectNode
             }
             else
             {
-                CurrentRole = Role.FOLLOWER;
-                if (IsHealthy)
+                Thread.Sleep(WaitTime * 2);
+                if (CurrentRole != Role.FOLLOWER)
                 {
-                    if (!IsTest)
-                    {
-                        ElectionCountdownTimer.Start();
-                    }
-                    return voteCount;
+                    StartElection(term++);
                 }
+                else
+                {
+                    if (IsHealthy)
+                    {
+                        if (!IsTest)
+                        {
+                            ElectionCountdownTimer.Start();
+                        }
+                        return voteCount;
+                    }
+                }
+
             }
         }
         return 0;
     }
 
+
+    public void AddToLog(string key, string value, int logIndex, bool isVerifiedByLeader = false)
+    {
+        if (isVerifiedByLeader)
+        {
+            keyValueLog[key] = (value, logIndex);
+            Console.WriteLine($"Node {Identifier} as {CurrentRole} stored the value");
+        }
+        else
+        {
+            SendingHeartbeat();
+            keyValueLog[key] = (value, logIndex);
+            Console.WriteLine($"Node {Identifier} as {CurrentRole} stored the value");
+            foreach (var item in List)
+            {
+                SendingHeartbeat();
+                if (item.CurrentRole != Role.LEADER)
+                {
+                    item.AddToLog(key, value, logIndex, true);
+                }
+            }
+            SendingHeartbeat();
+        }
+    }
+
+    public string? EventualGet(string key)
+    {
+        // Return the latest value from the log
+        if (keyValueLog.TryGetValue(key, out (string, int) value))
+        {
+            return value.Item1;
+        }
+        else
+        {
+            return null; // Key not found
+        }
+    }
+
+    public bool CompareVersionAndSwap(string key, string newValue, int expectedVersion)
+    {
+        if (keyValueLog.TryGetValue(key, out (string, int) value))
+        {
+            var (_, version) = value;
+            if (version == expectedVersion)
+            {
+                Guid leader = FindLeader();
+                foreach (var item in List)
+                {
+                    if (item.Identifier == leader)
+                    {
+                        item.AddToLog(key, newValue, version + 1);
+                    }
+                }
+
+                return true; // Successful swap
+            }
+            else
+            {
+                return false; // Version mismatch
+            }
+        }
+        else
+        {
+            return false; // Key not found
+        }
+    }
+
+    // Method to perform a strong get operation
+    public string? StrongGet(string key)
+    {
+        // Check if this node is the current leader
+        if (CurrentRole == Role.LEADER)
+        {
+            if (ActuallyLeader())
+            {
+                return EventualGet(key);
+            }
+        }
+        return null;
+    }
+
+    public bool ActuallyLeader()
+    {
+        int count = 0;
+
+        foreach (var node in List)
+        {
+            if (node.CheckIsLeader(Identifier))
+            {
+                count++;
+            }
+        }
+        if (count * 2 > List.Count)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    private bool CheckIsLeader(Guid identifier)
+    {
+        var subjectNode = FindLeader();
+        if (subjectNode == identifier)
+        {
+            return true;
+        }
+        return false;
+    }
 }
 
 public enum Role
